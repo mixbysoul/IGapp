@@ -856,7 +856,14 @@
       });
     };
 
-    const batchSize = 400;
+    const requestedBatchSize = Number(options.batchSize);
+    const batchSize = requestMode === 'following'
+      ? Number.isFinite(requestedBatchSize) && requestedBatchSize > 0
+        ? Math.max(1, Math.floor(requestedBatchSize))
+        : 500
+      : Number.isFinite(requestedBatchSize) && requestedBatchSize > 0
+        ? Math.max(1, Math.floor(requestedBatchSize))
+        : 400;
     const merged = new Map();
     const queued = new Map();
     let totalCandidates = 0;
@@ -1030,7 +1037,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const { items, count, meta, batchFlushed } = await collectWithAutoScroll(
           'following',
           collectFollowingUsers,
-          (item) => item.username
+          (item) => item.username,
+          { batchSize: 500 }
         );
         if (!batchFlushed) {
           sendCrawlResultToBackground('following', items);
