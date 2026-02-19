@@ -166,6 +166,31 @@ function sendMessageToBackground(payload) {
   });
 }
 
+async function sendMessageToTabReliable(tabId, payload) {
+  let response = await sendMessageToTab(tabId, payload);
+  if (response.ok) {
+    return response;
+  }
+
+  const errorMessage = String(response.error || '');
+  if (!/Receiving end does not exist|Could not establish connection/i.test(errorMessage)) {
+    return response;
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content.js']
+    });
+    await sleep(300);
+    response = await sendMessageToTab(tabId, payload);
+  } catch (error) {
+    return { ok: false, error: `${errorMessage} / 재삽입 후 재시도 실패: ${error.message || error}` };
+  }
+
+  return response;
+}
+
 function sendMessageToTab(tabId, payload) {
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, payload, (response) => {
@@ -1053,7 +1078,7 @@ async function handleCrawl(mode) {
   }
   setStatus(`탭 준비: ${tabPath}`);
 
-  let response = await sendMessageToTab(tab.id, { type: 'crawl:start', mode });
+  let response = await sendMessageToTabReliable(tab.id, { type: 'crawl:start', mode });
   if (!response.ok) {
     setStatus(`컨텐츠 스크립트 응답 실패: ${response.error || '직접 수집으로 전환'}`);
     const fallback = await collectDirectFromPage(tab, mode);
