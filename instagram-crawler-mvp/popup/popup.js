@@ -17,6 +17,26 @@ const elements = {
 let cachedData = null;
 let lastCrawlMeta = null;
 let cachedRawStorage = null;
+const crawlState = {
+  saved: { running: false },
+  following: { running: false }
+};
+
+function setCrawlButton(mode, running) {
+  if (mode === 'following' && elements.crawlFollowing) {
+    elements.crawlFollowing.textContent = running ? '중지' : '팔로우 목록 수집';
+  }
+}
+
+function isModeCrawling(mode) {
+  return Boolean(crawlState[mode]?.running);
+}
+
+function setModeRunning(mode, running) {
+  if (crawlState[mode]) {
+    crawlState[mode].running = Boolean(running);
+  }
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1064,6 +1084,22 @@ async function loadData() {
 }
 
 async function handleCrawl(mode) {
+  const isRunning = isModeCrawling(mode);
+  if (isRunning) {
+    const tab = await getInstagramTab(mode);
+    if (!tab || !tab.id) {
+      setStatus('중지할 수 있는 Instagram 탭을 찾지 못했습니다.');
+      return;
+    }
+    const stopResponse = await sendMessageToTabReliable(tab.id, { type: 'crawl:stop', mode });
+    if (!stopResponse.ok) {
+      setStatus(`중지 요청 실패: ${stopResponse.error || '알 수 없는 오류'}`);
+      return;
+    }
+    setStatus('중지 요청했습니다. 수집 완료 직전까지 데이터가 저장됩니다.');
+    return;
+  }
+
   setStatus('크롤링 요청 중...');
   const tab = await getInstagramTab(mode);
   if (!tab || !tab.id) {
@@ -1078,73 +1114,84 @@ async function handleCrawl(mode) {
   }
   setStatus(`탭 준비: ${tabPath}`);
 
-  let response = await sendMessageToTabReliable(tab.id, { type: 'crawl:start', mode });
-  if (!response.ok) {
-    setStatus(`컨텐츠 스크립트 응답 실패: ${response.error || '직접 수집으로 전환'}`);
-    const fallback = await collectDirectFromPage(tab, mode);
-    if (!fallback.ok) {
-      setStatus(`직접 수집 실패: ${fallback.error}`);
+  setModeRunning(mode, true);
+  setCrawlButton(mode, true);
+  let response = { ok: false };
+  try {
+    response = await sendMessageToTabReliable(tab.id, { type: 'crawl:start', mode });
+    if (!response.ok) {
+      setStatus(`컨텐츠 스크립트 응답 실패: ${response.error || '직접 수집으로 전환'}`);
+      const fallback = await collectDirectFromPage(tab, mode);
+      if (!fallback.ok) {
+        setStatus(`직접 수집 실패: ${fallback.error}`);
+        return;
+      }
+
+      let forwarded = { ok: true, count: fallback.count || 0, kind: fallback.kind };
+      if (!fallback.batchFlushed) {
+        forwarded = await sendMessageToBackground({
+          type: 'crawl:result',
+          payload: {
+            kind: fallback.kind,
+            items: fallback.items
+          }
+        });
+        if (!forwarded.ok) {
+          setStatus(forwarded.error || '백그라운드 전달 실패');
+          return;
+        }
+      }
+
+      response = {
+        ok: true,
+        kind: fallback.kind,
+        count: fallback.batchFlushed ? (Number(fallback.meta?.storedTotal) || Number(fallback.count || 0)) : (Number(forwarded.count) || Number(fallback.count || 0)),
+        meta: {
+          totalChecked: fallback.meta?.totalChecked || fallback.count,
+          totalCandidates: fallback.meta?.totalCandidates || fallback.count,
+          collected: fallback.meta?.collected || fallback.count,
+          rounds: fallback.meta?.rounds || 1,
+          maxRoundsReached: fallback.meta?.maxRoundsReached || false
+        }
+      };
+    }
+
+    if (!response.ok) {
+      setStatus(`수집 실패: ${response.error || '알 수 없는 오류'}`);
       return;
     }
 
-    let forwarded = { ok: true, count: fallback.count || 0, kind: fallback.kind };
-    if (!fallback.batchFlushed) {
-      forwarded = await sendMessageToBackground({
-        type: 'crawl:result',
-        payload: {
-          kind: fallback.kind,
-          items: fallback.items
-        }
-      });
-      if (!forwarded.ok) {
-        setStatus(forwarded.error || '백그라운드 전달 실패');
-        return;
-      }
-    }
-
-    response = {
+    const tabResponse = {
       ok: true,
-      kind: fallback.kind,
-      count: fallback.batchFlushed ? (Number(fallback.meta?.storedTotal) || Number(fallback.count || 0)) : (Number(forwarded.count) || Number(fallback.count || 0)),
-      meta: {
-        totalChecked: fallback.meta?.totalChecked || fallback.count,
-        totalCandidates: fallback.meta?.totalCandidates || fallback.count,
-        collected: fallback.meta?.collected || fallback.count,
-        rounds: fallback.meta?.rounds || 1,
-        maxRoundsReached: fallback.meta?.maxRoundsReached || false
-      }
+      kind: response.kind,
+      count: response.batchFlushed ? (Number(response.count) || 0) : (Number(response.count) || 0),
+      meta: response.meta || {}
     };
+    lastCrawlMeta = tabResponse.meta || null;
+    const suffix = mode === 'following' ? '팔로우' : '저장글';
+    const stopped = Boolean(response.stopped || response.meta?.stopped);
+    const stateText = stopped ? '중지됨' : '완료';
+    const savedFolderInfo =
+      mode === 'saved' && response.meta?.savedFolderCount
+        ? ` / 폴더 ${response.meta.savedFolderCount}개`
+        : '';
+    if (tabResponse.count === 0) {
+      setStatus(
+        `${suffix} 수집 결과 0개입니다. 인스타 페이지에서 아래로 충분히 스크롤한 뒤 다시 시도해 보세요.`
+      );
+    } else {
+      const detail = lastCrawlMeta
+        ? ` (확인: 라운드 ${lastCrawlMeta.rounds || 0}, 후보 ${lastCrawlMeta.totalCandidates || 0}, 총탐색 ${lastCrawlMeta.totalChecked || 0})`
+        : '';
+      const truncated = lastCrawlMeta?.maxRoundsReached ? ' / 최대 스크롤 횟수 도달(중단될 수 있음)' : '';
+      const stoppedMessage = stopped ? ' / 중지 요청 지점까지 수집됨' : '';
+      setStatus(`${suffix} 수집 ${stateText} (${tabResponse.count}개)${savedFolderInfo}${detail}${truncated}${stoppedMessage}`);
+    }
+    await loadData();
+  } finally {
+    setModeRunning(mode, false);
+    setCrawlButton(mode, false);
   }
-
-  if (!response.ok) {
-    setStatus(`수집 실패: ${response.error || '알 수 없는 오류'}`);
-    return;
-  }
-
-  const tabResponse = {
-    ok: true,
-    kind: response.kind,
-    count: response.batchFlushed ? (Number(response.count) || 0) : (Number(response.count) || 0),
-    meta: response.meta || {}
-  };
-  lastCrawlMeta = tabResponse.meta || null;
-  const suffix = mode === 'following' ? '팔로우' : '저장글';
-  const savedFolderInfo =
-    mode === 'saved' && response.meta?.savedFolderCount
-      ? ` / 폴더 ${response.meta.savedFolderCount}개`
-      : '';
-  if (tabResponse.count === 0) {
-    setStatus(
-      `${suffix} 수집 결과 0개입니다. 인스타 페이지에서 아래로 충분히 스크롤한 뒤 다시 시도해 보세요.`
-    );
-  } else {
-    const detail = lastCrawlMeta
-      ? ` (확인: 라운드 ${lastCrawlMeta.rounds || 0}, 후보 ${lastCrawlMeta.totalCandidates || 0}, 총탐색 ${lastCrawlMeta.totalChecked || 0})`
-      : '';
-    const truncated = lastCrawlMeta?.maxRoundsReached ? ' / 최대 스크롤 횟수 도달(중단될 수 있음)' : '';
-    setStatus(`${suffix} 수집 완료 (${tabResponse.count}개)${savedFolderInfo}${detail}${truncated}`);
-  }
-  await loadData();
 }
 
 async function handleClear() {

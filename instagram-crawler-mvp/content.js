@@ -34,6 +34,33 @@
   const SCRAPE_DELAY_MS = 700;
   const SAVED_SEGMENT = 'saved';
   const SAVED_ALL_POSTS_SEGMENT = 'all-posts';
+  const crawlState = {
+    saved: { running: false, stopRequested: false },
+    following: { running: false, stopRequested: false }
+  };
+
+  const setCrawlState = (mode, updates) => {
+    const state = crawlState[mode];
+    if (!state) {
+      return;
+    }
+    Object.assign(state, updates);
+  };
+
+  const requestCrawlStop = (mode) => {
+    setCrawlState(mode, { stopRequested: true });
+  };
+
+  const clearCrawlStop = (mode) => {
+    setCrawlState(mode, { stopRequested: false });
+  };
+
+  const markCrawlRunning = (mode, running) => {
+    setCrawlState(mode, { running: Boolean(running) });
+  };
+
+  const isCrawlRunning = (mode) => Boolean(crawlState[mode]?.running);
+  const isCrawlStopRequested = (mode) => Boolean(crawlState[mode]?.stopRequested);
 
   const toAbsoluteUrl = (href) => {
     try {
@@ -687,8 +714,14 @@
     let totalCollected = 0;
     let maxRoundsReached = false;
     let maxRounds = 0;
+    let stoppedByUser = false;
 
     for (const target of targets) {
+      if (isCrawlStopRequested('saved')) {
+        stoppedByUser = true;
+        break;
+      }
+
       const navigated = await navigateToSavedFolder(target);
       if (!navigated) {
         continue;
@@ -698,6 +731,10 @@
         crawlAt,
         crawlOrderStart: crawlOrder
       });
+      if (result?.meta?.stopped) {
+        stoppedByUser = true;
+      }
+
       const items = result.items || [];
       items.forEach((item) => {
         const key = item.postId || item.id;
@@ -722,6 +759,10 @@
       if (result.meta && result.meta.maxRoundsReached) {
         maxRoundsReached = true;
       }
+      if (isCrawlStopRequested('saved')) {
+        stoppedByUser = true;
+        break;
+      }
     }
 
     return {
@@ -738,7 +779,8 @@
         totalCandidates,
         collected: totalCollected,
         rounds: maxRounds,
-        maxRoundsReached
+        maxRoundsReached,
+        stopped: stoppedByUser
       }
     };
   };
@@ -910,9 +952,17 @@
       return payload.length;
     };
 
+    let stoppedByUser = false;
+
     for (let i = 0; i < maxRounds; i += 1) {
+      if (isCrawlStopRequested(requestMode)) {
+        stoppedByUser = true;
+        break;
+      }
+
       scroller = getScroller() || scroller;
       if (!scroller) {
+        stoppedByUser = stoppedByUser || isCrawlStopRequested(requestMode);
         break;
       }
 
@@ -948,9 +998,19 @@
       });
 
       await flush();
+      if (isCrawlStopRequested(requestMode)) {
+        stoppedByUser = true;
+        break;
+      }
 
       reachedBottom = isAtBottom(scroller);
       if (reachedBottom && stable >= stableRoundLimit) {
+        stoppedByUser = stoppedByUser || isCrawlStopRequested(requestMode);
+        break;
+      }
+
+      if (isCrawlStopRequested(requestMode)) {
+        stoppedByUser = true;
         break;
       }
 
@@ -962,7 +1022,7 @@
     const lastPayload = await flush(true);
     maxRoundsReached = rounds >= maxRounds;
 
-    return {
+      return {
       items: [...merged.values()],
       count: merged.size,
       nextCrawlOrder: crawlOrder,
@@ -978,7 +1038,8 @@
         appended: accumulatedAdded,
         updated: accumulatedUpdated,
         storedTotal: lastStoredCount,
-        lastPayload
+        lastPayload,
+        stopped: stoppedByUser
       },
       batchFlushed: true
     };
@@ -994,6 +1055,27 @@
     });
   };
 
+  const sendCrawlResultToBackgroundAsync = (kind, items) => {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: 'crawl:result',
+          payload: {
+            kind,
+            items
+          }
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false, error: chrome.runtime.lastError.message });
+            return;
+          }
+          resolve(response || { ok: false, error: 'No response' });
+        }
+      );
+    });
+  };
+
   const bootstrapLauncher = async () => {
     if (!document.body) {
       window.addEventListener('DOMContentLoaded', () => {
@@ -1004,8 +1086,23 @@
     await ensureLauncherButton();
   };
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!message || message.type !== 'crawl:start') {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || !message.type) {
+      return false;
+    }
+
+    if (message.type === 'crawl:stop') {
+      const requestMode = message.mode === 'following' ? 'following' : message.mode === 'saved' ? 'saved' : '';
+      if (!requestMode) {
+        sendResponse({ ok: false, error: `지원하지 않는 모드입니다: ${message.mode}` });
+        return true;
+      }
+      requestCrawlStop(requestMode);
+      sendResponse({ ok: true, mode: requestMode, running: isCrawlRunning(requestMode) });
+      return true;
+    }
+
+    if (message.type !== 'crawl:start') {
       return false;
     }
 
@@ -1017,22 +1114,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
 
-    if (message.mode === 'saved') {
+    const requestMode = message.mode === 'following' ? 'following' : message.mode === 'saved' ? 'saved' : '';
+    if (!requestMode) {
+      sendResponse({ ok: false, error: `지원하지 않는 모드입니다: ${message.mode}` });
+      return true;
+    }
+
+    if (isCrawlRunning(requestMode)) {
+      sendResponse({ ok: false, error: `${requestMode} 크롤링이 이미 진행 중입니다.` });
+      return true;
+    }
+
+    markCrawlRunning(requestMode, true);
+    clearCrawlStop(requestMode);
+    if (requestMode === 'saved') {
       (async () => {
         const { items, count, meta, batchFlushed, maxRoundsReached = false } = await collectSavedPostsAcrossFolders();
+        const stopped = Boolean(meta?.stopped);
         if (!batchFlushed) {
-          sendCrawlResultToBackground('saved', items);
-          sendResponse({ ok: true, kind: 'saved', count: items.length, meta });
+          const forwarded = await sendCrawlResultToBackgroundAsync('saved', items);
+          if (!forwarded.ok) {
+            throw new Error(forwarded.error || '백그라운드 저장 실패');
+          }
+          sendResponse({ ok: true, kind: 'saved', count: items.length, meta, stopped });
           return;
         }
-        sendResponse({ ok: true, kind: 'saved', count, meta, batchFlushed: true, maxRoundsReached });
+        sendResponse({ ok: true, kind: 'saved', count, meta, batchFlushed: true, maxRoundsReached, stopped });
       })().catch((error) => {
         sendResponse({ ok: false, error: String(error) });
+      }).finally(() => {
+        markCrawlRunning(requestMode, false);
+        clearCrawlStop(requestMode);
       });
       return true;
     }
 
-    if (message.mode === 'following') {
+    if (requestMode === 'following') {
       (async () => {
         const { items, count, meta, batchFlushed } = await collectWithAutoScroll(
           'following',
@@ -1040,19 +1157,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           (item) => item.username,
           { batchSize: 500 }
         );
+        const stopped = Boolean(meta?.stopped);
         if (!batchFlushed) {
-          sendCrawlResultToBackground('following', items);
-          sendResponse({ ok: true, kind: 'following', count: items.length, meta });
+          const forwarded = await sendCrawlResultToBackgroundAsync('following', items);
+          if (!forwarded.ok) {
+            throw new Error(forwarded.error || '백그라운드 저장 실패');
+          }
+          sendResponse({ ok: true, kind: 'following', count: items.length, meta, stopped });
           return;
         }
-        sendResponse({ ok: true, kind: 'following', count, meta, batchFlushed: true });
+        sendResponse({ ok: true, kind: 'following', count, meta, batchFlushed: true, stopped });
       })().catch((error) => {
         sendResponse({ ok: false, error: String(error) });
+      }).finally(() => {
+        markCrawlRunning(requestMode, false);
+        clearCrawlStop(requestMode);
       });
       return true;
     }
 
     sendResponse({ ok: false, error: `지원하지 않는 모드입니다: ${message.mode}` });
+    markCrawlRunning(requestMode, false);
+    clearCrawlStop(requestMode);
     return true;
   });
 
