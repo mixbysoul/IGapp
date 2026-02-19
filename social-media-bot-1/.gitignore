@@ -1,0 +1,6 @@
+social_media.sqlite
+.env
+.DS_Store
+.venv/
+venv/
+__pycache__/

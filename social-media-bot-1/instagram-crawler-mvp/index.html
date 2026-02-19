@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IG Organizer Studio by SoUL</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #111a2f;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --line: #23314f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: 'Arial', 'Malgun Gothic', sans-serif;
+      background: radial-gradient(circle at 12% 12%, #1a2a4a 0%, var(--bg) 40%, #060912 100%);
+      color: var(--text);
+    }
+
+    .wrap {
+      max-width: 760px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 28px;
+      letter-spacing: -0.01em;
+    }
+
+    p {
+      margin: 8px 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .card {
+      margin-top: 18px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    .btn {
+      border: 1px solid transparent;
+      color: #dbeafe;
+      background: linear-gradient(180deg, #1d4ed8, #1e40af);
+      padding: 11px 16px;
+      border-radius: 10px;
+      text-decoration: none;
+      font-weight: 700;
+      display: inline-block;
+    }
+
+    .btn.secondary {
+      background: #1f2937;
+      border-color: #334155;
+    }
+
+    .hint {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+
+    .mono {
+      font-family: Consolas, 'Courier New', monospace;
+      font-size: 13px;
+      background: rgba(10, 17, 34, 0.9);
+      border: 1px solid #23314f;
+      border-radius: 10px;
+      padding: 10px;
+      color: #d1d5db;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1>IG Organizer Studio by SoUL</h1>
+    <p>로컬 뷰어를 바로 열기 어려웠던 부분을 줄이기 위해 새로 만든 진입 페이지입니다.</p>
+
+    <div class="card">
+      <div class="row">
+        <a class="btn" id="openViewer" href="./local-viewer/index.html">로컬 뷰어 열기</a>
+        <a class="btn secondary" href="./local-viewer/styles.css" target="_blank" rel="noreferrer">CSS 확인용</a>
+      </div>
+      <div class="row">
+        <a class="btn secondary" href="./popup/dashboard.html" target="_blank" rel="noreferrer">확장 대시보드 페이지</a>
+      </div>
+      <div class="hint">
+        <p>원하면 여길 메인 실행 페이지로 두고, JSON을 드롭해서 바로 로드하는 버튼을 추가할 수도 있어요.</p>
+        <p>
+          크레딧: <a class="text-link" href="https://www.threads.com/@mixbysoul" target="_blank" rel="noreferrer">Threads(@mixbysoul)</a>
+          · <a class="text-link" href="https://www.instagram.com/mixbysoul" target="_blank" rel="noreferrer">Instagram(@mixbysoul)</a>
+        </p>
+        <div class="mono">file:///Users/soulnation/Desktop/Codex/social-media-bot-1/instagram-crawler-mvp/index.html</div>
+        <div class="mono">또는 http://127.0.0.1:8787/index.html (python -m http.server로 실행)</div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const viewBtn = document.getElementById('openViewer');
+    viewBtn.addEventListener('click', () => {
+      // no-op: just keep explicit intent for future extension hooks
+    });
+  </script>
+</body>
+</html>

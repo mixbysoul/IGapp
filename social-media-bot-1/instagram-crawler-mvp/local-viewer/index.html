@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IG Organizer Studio by SoUL</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>IG Organizer Studio by SoUL</h1>
+      <p>확장 프로그램에서 내려받은 JSON을 여기서 바로 불러와 저장글/팔로워를 정리합니다.</p>
+      <p class="credit-line">
+        Credit: <a class="text-link" href="https://www.threads.com/@mixbysoul" target="_blank" rel="noreferrer">SoUL</a>
+        (Threads: <a class="text-link" href="https://www.threads.com/@mixbysoul" target="_blank" rel="noreferrer">@mixbysoul</a>
+        / Instagram: <a class="text-link" href="https://www.instagram.com/mixbysoul" target="_blank" rel="noreferrer">@mixbysoul</a>)
+      </p>
+      <a class="btn link" href="../" target="_blank">프로젝트 시작 페이지로 이동</a>
+    </header>
+
+    <section class="panel">
+      <div class="panel-title">1) JSON 불러오기</div>
+      <div class="controls">
+        <label class="btn file-btn">
+          <input id="fileInput" type="file" accept="application/json,.json" />
+          파일 열기
+        </label>
+        <button id="pasteBtn" class="btn ghost">클립보드 붙여넣기</button>
+        <button id="applyBtn" class="btn ghost">붙여넣기 적용</button>
+        <button id="copyBtn" class="btn ghost">현재 상태 복사</button>
+        <button id="downloadBtn" class="btn ghost">현재 상태 저장</button>
+        <button id="clearBtn" class="btn danger">초기화</button>
+      </div>
+      <textarea id="pasteArea" rows="4" placeholder="JSON 텍스트를 붙여넣고 ‘붙여넣기 적용’을 눌러주세요"></textarea>
+      <div id="status" class="status">준비됨</div>
+      <pre id="debugText"></pre>
+    </section>
+
+    <section class="view-switch">
+      <button id="viewPosts" class="btn active">저장글</button>
+      <button id="viewFriends" class="btn ghost">팔로워</button>
+    </section>
+
+    <section class="panel">
+      <div id="summary" class="summary"></div>
+    </section>
+
+    <section id="postsPanel">
+      <div class="panel-title">저장글 정리</div>
+      <div class="controls-grid">
+        <input id="postSearchInput" placeholder="검색 (작성자/캡션/링크/폴더)" />
+        <select id="postCategoryFilter"></select>
+        <select id="postSort">
+          <option value="savedAtDesc">저장일 최신순</option>
+          <option value="savedAtAsc">저장일 오래된순</option>
+          <option value="username">작성자순</option>
+          <option value="crawlOrder">수집순서</option>
+        </select>
+        <select id="postSize">
+          <option value="small">작게</option>
+          <option value="medium" selected>보통</option>
+          <option value="large">크게</option>
+        </select>
+        <button id="selectAllPostsBtn" class="btn ghost">현재 목록 전체 선택</button>
+        <button id="clearPostSelectionBtn" class="btn ghost">선택 해제</button>
+        <input id="newPostCategory" placeholder="새 게시글 카테고리" />
+        <button id="addPostCategoryBtn" class="btn ghost">카테고리 추가</button>
+        <select id="postBulkCategory"></select>
+        <button id="applyPostBulkCategoryBtn" class="btn">선택 항목 일괄 분류</button>
+      </div>
+      <div id="postList" class="post-list"></div>
+    </section>
+
+    <section id="friendsPanel" class="hidden">
+      <div class="panel-title">팔로워 정리</div>
+      <div class="controls-grid">
+        <input id="friendSearchInput" placeholder="검색 (아이디/이름/소개)" />
+        <select id="friendCategoryFilter"></select>
+        <select id="friendSort">
+          <option value="crawlOrder">수집순서</option>
+          <option value="username">아이디순</option>
+          <option value="category">카테고리순</option>
+          <option value="memoUpdatedAt">메모 최신순</option>
+        </select>
+        <label class="checkline"><input id="friendMemoOnly" type="checkbox" /> 메모 있는 항목만</label>
+        <button id="selectAllFriendsBtn" class="btn ghost">현재 목록 전체 선택</button>
+        <button id="clearFriendSelectionBtn" class="btn ghost">선택 해제</button>
+        <input id="newFriendCategory" placeholder="새 팔로워 카테고리" />
+        <button id="addFriendCategoryBtn" class="btn ghost">카테고리 추가</button>
+        <select id="friendBulkCategory"></select>
+        <button id="applyFriendBulkCategoryBtn" class="btn">선택 항목 일괄 분류</button>
+      </div>
+      <div id="friendList" class="friend-list"></div>
+    </section>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
