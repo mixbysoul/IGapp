@@ -38,6 +38,80 @@
     saved: { running: false, stopRequested: false },
     following: { running: false, stopRequested: false }
   };
+  const STOP_REQUEST_KEY = '__IG_ORGANIZER_STOP_REQUESTS';
+  let stopRequestStore = {};
+  const normalizeStopRequestStore = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return {};
+    }
+    return value;
+  };
+
+  const persistStopRequestStore = () => {
+    try {
+      chrome.storage?.local?.set({ [STOP_REQUEST_KEY]: stopRequestStore });
+    } catch {
+      // ignore persistence failures
+    }
+  };
+
+  const updateStopRequestStoreFromWindow = () => {
+    try {
+      stopRequestStore = {
+        ...normalizeStopRequestStore(window[STOP_REQUEST_KEY])
+      };
+    } catch {
+      stopRequestStore = {};
+    }
+  };
+
+  const hydrateStopRequestStore = () => {
+    try {
+      chrome.storage?.local?.get(STOP_REQUEST_KEY, (items) => {
+        try {
+          stopRequestStore = normalizeStopRequestStore(items?.[STOP_REQUEST_KEY]);
+        } catch {
+          stopRequestStore = {};
+        }
+      });
+    } catch {
+      updateStopRequestStoreFromWindow();
+    }
+  };
+
+  try {
+    hydrateStopRequestStore();
+    chrome.storage?.onChanged?.addListener((changes, areaName) => {
+      if (areaName !== 'local' || !changes?.[STOP_REQUEST_KEY]) {
+        return;
+      }
+      try {
+        stopRequestStore = normalizeStopRequestStore(changes[STOP_REQUEST_KEY].newValue);
+      } catch {
+        stopRequestStore = {};
+      }
+    });
+  } catch {
+    // ignore storage event wiring failures
+  }
+
+  const ensureStopRequests = () => {
+    updateStopRequestStoreFromWindow();
+    const bucket = normalizeStopRequestStore(stopRequestStore);
+    if (!bucket || typeof bucket !== 'object' || Array.isArray(bucket)) {
+      return {};
+    }
+    try {
+      const current = window[STOP_REQUEST_KEY];
+      if (current && typeof current === 'object' && !Array.isArray(current)) {
+        return { ...current };
+      }
+    } catch {
+      // ignore
+    }
+    window[STOP_REQUEST_KEY] = bucket;
+    return bucket;
+  };
 
   const setCrawlState = (mode, updates) => {
     const state = crawlState[mode];
@@ -49,10 +123,32 @@
 
   const requestCrawlStop = (mode) => {
     setCrawlState(mode, { stopRequested: true });
+    try {
+      const stops = ensureStopRequests();
+      const nextStops = {
+        ...normalizeStopRequestStore(stops),
+        [String(mode)]: true
+      };
+      stopRequestStore = nextStops;
+      window[STOP_REQUEST_KEY] = nextStops;
+      persistStopRequestStore();
+    } catch {
+      // ignore
+    }
   };
 
   const clearCrawlStop = (mode) => {
     setCrawlState(mode, { stopRequested: false });
+    try {
+      const stops = ensureStopRequests();
+      const nextStops = normalizeStopRequestStore(stops);
+      delete nextStops[String(mode)];
+      stopRequestStore = nextStops;
+      window[STOP_REQUEST_KEY] = nextStops;
+      persistStopRequestStore();
+    } catch {
+      // ignore
+    }
   };
 
   const markCrawlRunning = (mode, running) => {
@@ -60,7 +156,50 @@
   };
 
   const isCrawlRunning = (mode) => Boolean(crawlState[mode]?.running);
-  const isCrawlStopRequested = (mode) => Boolean(crawlState[mode]?.stopRequested);
+  const isCrawlStopRequested = (mode) => {
+    if (crawlState[mode]?.stopRequested) {
+      return true;
+    }
+    updateStopRequestStoreFromWindow();
+    const fromWindow = normalizeStopRequestStore(window[STOP_REQUEST_KEY])[String(mode)];
+    const fromStore = normalizeStopRequestStore(stopRequestStore)[String(mode)];
+    if (fromStore) {
+      return true;
+    }
+    if (fromWindow) {
+      return true;
+    }
+    return false;
+  };
+
+  const getStopRequestsFromStorageAsync = () => {
+    return new Promise((resolve) => {
+      if (!chrome.storage?.local?.get) {
+        resolve({});
+        return;
+      }
+
+      chrome.storage.local.get(STOP_REQUEST_KEY, (items) => {
+        if (chrome.runtime.lastError) {
+          resolve({});
+          return;
+        }
+        const parsed = normalizeStopRequestStore(items?.[STOP_REQUEST_KEY]);
+        stopRequestStore = parsed;
+        window[STOP_REQUEST_KEY] = parsed;
+        resolve(parsed);
+      });
+    });
+  };
+
+  const isCrawlStopRequestedAsync = async (mode) => {
+    if (isCrawlStopRequested(mode)) {
+      return true;
+    }
+
+    const parsed = await getStopRequestsFromStorageAsync();
+    return Boolean(parsed[String(mode)]);
+  };
 
   const toAbsoluteUrl = (href) => {
     try {
@@ -99,6 +238,33 @@
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const isMeaningfulValue = (value) => {
+    if (value === null || value === undefined) {
+      return false;
+    }
+    if (typeof value === 'string') {
+      return value.trim().length > 0;
+    }
+    if (typeof value === 'number') {
+      return Number.isFinite(value);
+    }
+    if (Array.isArray(value)) {
+      return value.length > 0;
+    }
+    return true;
+  };
+
+  const mergeCrawlRecord = (existing, incoming) => {
+    const merged = { ...(existing || {}) };
+    Object.entries(incoming || {}).forEach(([key, value]) => {
+      if (!isMeaningfulValue(value)) {
+        return;
+      }
+      merged[key] = value;
+    });
+    return merged;
+  };
 
   const parseProfileFromHref = (href) => {
     try {
@@ -877,25 +1043,41 @@
       scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
     };
 
-    const sendChunk = (kind, payloadItems) => {
-      return new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-          {
-            type: 'crawl:result',
-            payload: {
-              kind,
-              items: payloadItems
+    const sendChunk = async (kind, payloadItems, maxRetry = 3) => {
+      let attempt = 0;
+      let lastError = 'background merge failed';
+      while (attempt < maxRetry) {
+        attempt += 1;
+        const response = await new Promise((resolve) => {
+          chrome.runtime.sendMessage(
+            {
+              type: 'crawl:result',
+              payload: {
+                kind,
+                items: payloadItems
+              }
+            },
+            (result) => {
+              if (chrome.runtime.lastError) {
+                resolve({ ok: false, error: chrome.runtime.lastError.message });
+                return;
+              }
+              resolve(result || { ok: false, error: 'No response' });
             }
-          },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              resolve({ ok: false, error: chrome.runtime.lastError.message });
-              return;
-            }
-            resolve(response || { ok: false, error: 'No response' });
-          }
-        );
-      });
+          );
+        });
+
+        if (response && response.ok) {
+          return response;
+        }
+
+        lastError = String(response?.error || 'No response');
+        if (attempt >= maxRetry) {
+          break;
+        }
+        await sleep(120 * attempt);
+      }
+      return { ok: false, error: lastError };
     };
 
     const requestedBatchSize = Number(options.batchSize);
@@ -986,14 +1168,22 @@
         if (!key) {
           return;
         }
+        const payloadItem = {
+          ...item,
+          crawlAt,
+          crawlOrder: merged.has(key) ? (merged.get(key)?.crawlOrder ?? crawlOrder++) : crawlOrder++
+        };
         if (!merged.has(key)) {
-          const payloadItem = {
-            ...item,
-            crawlAt,
-            crawlOrder: crawlOrder++
-          };
           merged.set(key, payloadItem);
           queued.set(key, payloadItem);
+          return;
+        }
+
+        const mergedBefore = merged.get(key) || {};
+        const mergedAfter = mergeCrawlRecord(mergedBefore, payloadItem);
+        if (JSON.stringify(mergedAfter) !== JSON.stringify(mergedBefore)) {
+          merged.set(key, mergedAfter);
+          queued.set(key, mergedAfter);
         }
       });
 

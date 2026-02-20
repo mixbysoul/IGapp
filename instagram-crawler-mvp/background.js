@@ -89,6 +89,36 @@ function normalizeFriend(friend) {
   };
 }
 
+function isMeaningfulValue(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    return value.trim().length > 0;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value);
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  return true;
+}
+
+function mergeRecord(existing, incoming) {
+  const merged = { ...(existing || {}) };
+  Object.entries(incoming || {}).forEach(([key, value]) => {
+    if (key === 'id' || key === 'postId') {
+      return;
+    }
+    if (!isMeaningfulValue(value)) {
+      return;
+    }
+    merged[key] = value;
+  });
+  return merged;
+}
+
 function inferCategoryFromText(text, rules) {
   const normalized = toLowerTrim(text);
   let bestCategory = UNKNOWN_LABEL;
@@ -174,10 +204,8 @@ async function mergeSavedPosts(items) {
 
     if (map.has(post.id)) {
       const existing = map.get(post.id) || {};
-      const merged = {
-        ...existing,
-        ...post
-      };
+      const merged = mergeRecord(existing, post);
+      merged.id = post.id;
       if (post.crawlAt == null && existing.crawlAt != null) {
         merged.crawlAt = existing.crawlAt;
       }
@@ -228,10 +256,8 @@ async function mergeFriends(items) {
 
     if (map.has(friend.id)) {
       const existing = map.get(friend.id) || {};
-      const merged = {
-        ...existing,
-        ...friend
-      };
+      const merged = mergeRecord(existing, friend);
+      merged.id = friend.id;
       if (friend.crawlAt == null && existing.crawlAt != null) {
         merged.crawlAt = existing.crawlAt;
       }

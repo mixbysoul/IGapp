@@ -23,8 +23,11 @@
       <div class="panel-title">1) JSON 불러오기</div>
       <div class="controls">
         <label class="btn file-btn">
-          <input id="fileInput" type="file" accept="application/json,.json" />
+          <input id="fileInput" type="file" accept="application/json,.json" multiple />
           파일 열기
+        </label>
+        <label class="checkline">
+          <input id="mergeMode" type="checkbox" /> 파일 병합(복수 파일 선택 시 기존 데이터에 추가)
         </label>
         <button id="pasteBtn" class="btn ghost">클립보드 붙여넣기</button>
         <button id="applyBtn" class="btn ghost">붙여넣기 적용</button>
@@ -82,6 +85,11 @@
           <option value="username">아이디순</option>
           <option value="category">카테고리순</option>
           <option value="memoUpdatedAt">메모 최신순</option>
+        </select>
+        <select id="friendSize">
+          <option value="small">작게</option>
+          <option value="medium" selected>보통</option>
+          <option value="large">크게</option>
         </select>
         <label class="checkline"><input id="friendMemoOnly" type="checkbox" /> 메모 있는 항목만</label>
         <button id="selectAllFriendsBtn" class="btn ghost">현재 목록 전체 선택</button>

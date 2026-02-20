@@ -21,8 +21,14 @@ const crawlState = {
   saved: { running: false },
   following: { running: false }
 };
+const STOP_REQUEST_KEY = '__IG_ORGANIZER_STOP_REQUESTS';
 
 function setCrawlButton(mode, running) {
+  const savedText = running ? '중지' : '저장글 수집';
+  if (mode === 'saved' && elements.crawlSaved) {
+    elements.crawlSaved.textContent = savedText;
+  }
+
   if (mode === 'following' && elements.crawlFollowing) {
     elements.crawlFollowing.textContent = running ? '중지' : '팔로우 목록 수집';
   }
@@ -80,6 +86,35 @@ function getLocalStorageSnapshot() {
         return;
       }
       resolve({ ok: true, data: items || {} });
+    });
+  });
+}
+
+function setStopRequestInStorage(mode, enabled = true) {
+  const requestMode = String(mode || '').trim();
+  return new Promise((resolve) => {
+    chrome.storage.local.get(STOP_REQUEST_KEY, (items) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+
+      const current = items && typeof items[STOP_REQUEST_KEY] === 'object' && !Array.isArray(items[STOP_REQUEST_KEY])
+        ? { ...items[STOP_REQUEST_KEY] }
+        : {};
+      if (enabled) {
+        current[requestMode] = true;
+      } else {
+        delete current[requestMode];
+      }
+
+      chrome.storage.local.set({ [STOP_REQUEST_KEY]: current }, () => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve({ ok: true });
+      });
     });
   });
 }
@@ -221,6 +256,55 @@ function sendMessageToTab(tabId, payload) {
       resolve(response || { ok: false, error: 'No response' });
     });
   });
+}
+
+function sendStopRequestFallback(tabId, mode) {
+  return new Promise((resolve) => {
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        args: [mode],
+        func: (requestMode) => {
+          try {
+            const key = '__IG_ORGANIZER_STOP_REQUESTS';
+            const bucket = (() => {
+              const current = window[key];
+              if (current && typeof current === 'object') {
+                return current;
+              }
+              return {};
+            })();
+            bucket[String(requestMode)] = true;
+            window[key] = bucket;
+            if (chrome.storage && chrome.storage.local) {
+              chrome.storage.local.set({ [key]: bucket });
+            }
+          } catch {
+            // ignore
+          }
+        }
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve({ ok: true, response });
+      }
+    );
+  });
+}
+
+function isPortClosedNoResponseError(message) {
+  const normalized = String(message || '').toLowerCase();
+  return normalized.includes('message port closed before a response was received') ||
+    normalized.includes('receiving end does not exist') ||
+    normalized.includes('could not establish connection');
+}
+
+function isAlreadyRunningError(message) {
+  const normalized = String(message || '').toLowerCase();
+  return normalized.includes('already running') || normalized.includes('진행 중');
 }
 
 function getInstagramTab(mode = 'saved') {
@@ -875,14 +959,14 @@ function collectDirectFromPage(tab, mode) {
               await sleep(180);
             }
 
-            await flush(true);
-            maxRoundsReached = rounds >= maxRounds;
+      await flush(true);
+      maxRoundsReached = rounds >= maxRounds;
 
-            const items = [...merged.values()];
-            return {
-              items: [],
-              count: items.length,
-              meta: {
+      const items = [...merged.values()];
+      return {
+        items,
+        count: items.length,
+        meta: {
                 totalChecked,
                 totalCandidates,
                 collected: merged.size,
@@ -1091,12 +1175,36 @@ async function handleCrawl(mode) {
       setStatus('중지할 수 있는 Instagram 탭을 찾지 못했습니다.');
       return;
     }
-    const stopResponse = await sendMessageToTabReliable(tab.id, { type: 'crawl:stop', mode });
+
+    const persistedStop = await setStopRequestInStorage(mode, true);
+    let stopResponse = await sendMessageToTab(tab.id, { type: 'crawl:stop', mode });
+    let stopHandled = stopResponse.ok;
+    if (!stopHandled && persistedStop.ok) {
+      stopHandled = true;
+    }
     if (!stopResponse.ok) {
-      setStatus(`중지 요청 실패: ${stopResponse.error || '알 수 없는 오류'}`);
+      const isPortClosedError = isPortClosedNoResponseError(stopResponse.error);
+      if (isPortClosedError || (stopResponse.error || '').includes('Could not establish connection')) {
+        const fallback = await sendStopRequestFallback(tab.id, mode);
+        stopHandled = stopHandled || fallback.ok;
+      } else if (!stopResponse.ok) {
+        stopHandled = false;
+      }
+
+      if (!stopHandled) {
+        setStatus(`중지 요청 실패: ${stopResponse.error || '알 수 없는 오류'}`);
+        return;
+      }
+    }
+
+    if (!stopHandled) {
+      setStatus(`중지 요청 전달은 되지 않았습니다.`);
       return;
     }
+
     setStatus('중지 요청했습니다. 수집 완료 직전까지 데이터가 저장됩니다.');
+    setModeRunning(mode, false);
+    setCrawlButton(mode, false);
     return;
   }
 
@@ -1106,6 +1214,7 @@ async function handleCrawl(mode) {
     setStatus('활성 Instagram 탭을 찾지 못했습니다.');
     return;
   }
+  await setStopRequestInStorage(mode, false);
   let tabPath = '알 수 없음';
   try {
     tabPath = new URL(tab.url).pathname;
@@ -1120,40 +1229,50 @@ async function handleCrawl(mode) {
   try {
     response = await sendMessageToTabReliable(tab.id, { type: 'crawl:start', mode });
     if (!response.ok) {
-      setStatus(`컨텐츠 스크립트 응답 실패: ${response.error || '직접 수집으로 전환'}`);
-      const fallback = await collectDirectFromPage(tab, mode);
-      if (!fallback.ok) {
-        setStatus(`직접 수집 실패: ${fallback.error}`);
+      if (isAlreadyRunningError(response.error)) {
+        setStatus('이미 실행 중인 수집이 있습니다. 중지 후 다시 시도해 주세요.');
         return;
       }
 
-      let forwarded = { ok: true, count: fallback.count || 0, kind: fallback.kind };
-      if (!fallback.batchFlushed) {
-        forwarded = await sendMessageToBackground({
-          type: 'crawl:result',
-          payload: {
-            kind: fallback.kind,
-            items: fallback.items
-          }
-        });
-        if (!forwarded.ok) {
-          setStatus(forwarded.error || '백그라운드 전달 실패');
+      if (isPortClosedNoResponseError(response.error)) {
+        setStatus(`컨텐츠 스크립트 응답 실패: ${response.error || '직접 수집으로 전환'}`);
+        const fallback = await collectDirectFromPage(tab, mode);
+        if (!fallback.ok) {
+          setStatus(`직접 수집 실패: ${fallback.error}`);
           return;
         }
-      }
 
-      response = {
-        ok: true,
-        kind: fallback.kind,
-        count: fallback.batchFlushed ? (Number(fallback.meta?.storedTotal) || Number(fallback.count || 0)) : (Number(forwarded.count) || Number(fallback.count || 0)),
-        meta: {
-          totalChecked: fallback.meta?.totalChecked || fallback.count,
-          totalCandidates: fallback.meta?.totalCandidates || fallback.count,
-          collected: fallback.meta?.collected || fallback.count,
-          rounds: fallback.meta?.rounds || 1,
-          maxRoundsReached: fallback.meta?.maxRoundsReached || false
+        let forwarded = { ok: true, count: fallback.count || 0, kind: fallback.kind };
+        if (!fallback.batchFlushed) {
+          forwarded = await sendMessageToBackground({
+            type: 'crawl:result',
+            payload: {
+              kind: fallback.kind,
+              items: fallback.items
+            }
+          });
+          if (!forwarded.ok) {
+            setStatus(forwarded.error || '백그라운드 전달 실패');
+            return;
+          }
         }
-      };
+
+        response = {
+          ok: true,
+          kind: fallback.kind,
+          count: fallback.batchFlushed ? (Number(fallback.meta?.storedTotal) || Number(fallback.count || 0)) : (Number(forwarded.count) || Number(fallback.count || 0)),
+          meta: {
+            totalChecked: fallback.meta?.totalChecked || fallback.count,
+            totalCandidates: fallback.meta?.totalCandidates || fallback.count,
+            collected: fallback.meta?.collected || fallback.count,
+            rounds: fallback.meta?.rounds || 1,
+            maxRoundsReached: fallback.meta?.maxRoundsReached || false
+          }
+        };
+      } else {
+        setStatus(`수집 실패: ${response.error || '알 수 없는 오류'}`);
+        return;
+      }
     }
 
     if (!response.ok) {

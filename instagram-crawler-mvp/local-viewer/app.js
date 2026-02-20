@@ -22,6 +22,7 @@ const state = {
     friendQuery: '',
     friendCategory: 'all',
     friendSort: 'crawlOrder',
+    friendSize: 'medium',
     friendMemoOnly: false
   }
 };
@@ -30,6 +31,7 @@ const $ = (id) => document.getElementById(id);
 
 const el = {
   fileInput: $('fileInput'),
+  mergeMode: $('mergeMode'),
   pasteBtn: $('pasteBtn'),
   applyBtn: $('applyBtn'),
   copyBtn: $('copyBtn'),
@@ -58,6 +60,7 @@ const el = {
   friendSearchInput: $('friendSearchInput'),
   friendCategoryFilter: $('friendCategoryFilter'),
   friendSort: $('friendSort'),
+  friendSize: $('friendSize'),
   friendMemoOnly: $('friendMemoOnly'),
   newFriendCategory: $('newFriendCategory'),
   addFriendCategoryBtn: $('addFriendCategoryBtn'),
@@ -313,8 +316,9 @@ function loadUiState() {
         state.friendMemoUpdatedAt[key] = numeric;
       });
     }
-    if (loaded.ui && typeof loaded.ui === 'object') {
+  if (loaded.ui && typeof loaded.ui === 'object') {
       state.ui = { ...state.ui, ...loaded.ui };
+      state.ui.friendSize = loaded.ui.friendSize || state.ui.friendSize;
     }
   } catch (error) {
     pushDebug(`로컬 상태 로드 실패: ${error.message || error}`);
@@ -364,6 +368,94 @@ function getByPath(root, path) {
     }
     return acc[key];
   }, root);
+}
+
+function isMeaningfulValue(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    return value.trim().length > 0;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value);
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === 'object') {
+    return Object.keys(value || {}).length > 0;
+  }
+  return true;
+}
+
+function mergeItem(base, incoming) {
+  const merged = { ...(base || {}) };
+  let changed = false;
+  Object.entries(incoming || {}).forEach(([key, value]) => {
+    if (!isMeaningfulValue(value)) {
+      return;
+    }
+    if (merged[key] === value) {
+      return;
+    }
+    merged[key] = value;
+    changed = true;
+  });
+  return changed ? merged : base;
+}
+
+function mergeByKey(existingItems, incomingItems, getKey) {
+  const merged = [...(Array.isArray(existingItems) ? existingItems : [])];
+  const keyToIndex = new Map();
+
+  merged.forEach((item, index) => {
+    const key = String(getKey(item) || '').trim();
+    if (key && !keyToIndex.has(key)) {
+      keyToIndex.set(key, index);
+    }
+  });
+
+  let added = 0;
+  let updated = 0;
+
+  (Array.isArray(incomingItems) ? incomingItems : []).forEach((incoming) => {
+    const key = String(getKey(incoming) || '').trim();
+    if (!key) {
+      return;
+    }
+    const foundIndex = keyToIndex.get(key);
+    if (foundIndex === undefined) {
+      merged.push(incoming);
+      keyToIndex.set(key, merged.length - 1);
+      added += 1;
+      return;
+    }
+    const mergedItem = mergeItem(merged[foundIndex], incoming);
+    if (mergedItem !== merged[foundIndex]) {
+      merged[foundIndex] = mergedItem;
+      updated += 1;
+    }
+  });
+
+  return { items: merged, added, updated };
+}
+
+function parsePayloadFromText(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    return { error: `JSON 파싱 실패: ${error.message || error}` };
+  }
+
+  const parsed = parsePayload(raw);
+  if (!parsed.savedPosts.length && !parsed.friends.length) {
+    return {
+      error: 'savedPosts/friends 배열을 찾지 못했습니다. JSON 구조( savedPosts, friends, 또는 단일 배열 )를 확인하세요.'
+    };
+  }
+  return { ok: true, parsed };
 }
 
 function coerceArray(value) {
@@ -722,23 +814,28 @@ function mergeCategoryAssignments(mapName, incoming) {
 }
 
 function loadPayloadFromJson(text) {
-  let raw;
-  try {
-    raw = JSON.parse(text);
-  } catch (error) {
-    return { error: `JSON 파싱 실패: ${error.message || error}` };
+  const parsedResult = parsePayloadFromText(text);
+  if (!parsedResult.ok) {
+    return parsedResult;
   }
+  return applyParsedPayload(parsedResult.parsed, { mergeMode: false });
+}
 
-  const parsed = parsePayload(raw);
+function applyParsedPayload(parsed, options = {}) {
+  const { mergeMode = false } = options;
+  const incomingPosts = normalizeUniquePosts(parsed.savedPosts);
+  const incomingFriends = normalizeUniqueFriends(parsed.friends);
 
-  if (!parsed.savedPosts.length && !parsed.friends.length) {
-    return {
-      error: 'savedPosts/friends 배열을 찾지 못했습니다. JSON 구조( savedPosts, friends, 또는 단일 배열 )를 확인하세요.'
-    };
+  if (!mergeMode) {
+    state.savedPosts = [];
+    state.friends = [];
+    state.postCategoryList = ['기타'];
+    state.friendCategoryList = ['기타'];
+    state.postCategories = {};
+    state.friendCategories = {};
+    state.friendMemos = {};
+    state.friendMemoUpdatedAt = {};
   }
-
-  const nextPosts = normalizeUniquePosts(parsed.savedPosts);
-  const nextFriends = normalizeUniqueFriends(parsed.friends);
 
   setDefaultsFromIncoming(parsed);
   mergeCategoryAssignments('postCategories', parsed.postCategories);
@@ -750,21 +847,29 @@ function loadPayloadFromJson(text) {
       if (!key) {
         return;
       }
-      state.friendMemos[key] = sanitizeMemo(memo);
-    });
-  }
-  if (parsed.friendMemoUpdatedAt) {
-    Object.entries(parsed.friendMemoUpdatedAt).forEach(([username, ts]) => {
-      const key = cleanText(username).toLowerCase();
-      if (!key || toNumber(ts) == null) {
+      const nextMemo = sanitizeMemo(memo);
+      if (!nextMemo) {
         return;
       }
-      state.friendMemoUpdatedAt[key] = toNumber(ts);
+      const incomingTs = toNumber(parsed.friendMemoUpdatedAt?.[key]) || Date.now();
+      const currentTs = toNumber(state.friendMemoUpdatedAt[key]) || 0;
+      if (mergeMode && currentTs > incomingTs) {
+        return;
+      }
+      state.friendMemos[key] = nextMemo;
+      state.friendMemoUpdatedAt[key] = incomingTs;
     });
   }
 
-  state.savedPosts = nextPosts;
-  state.friends = nextFriends;
+  const postResult = mergeMode
+    ? mergeByKey(state.savedPosts, incomingPosts, getPostKeyFromItem)
+    : { items: incomingPosts, added: incomingPosts.length, updated: 0 };
+  const friendResult = mergeMode
+    ? mergeByKey(state.friends, incomingFriends, getFriendKeyFromItem)
+    : { items: incomingFriends, added: incomingFriends.length, updated: 0 };
+
+  state.savedPosts = postResult.items;
+  state.friends = friendResult.items;
   state.selectedPostIds.clear();
   state.selectedFriendNames.clear();
   state.savedPosts.sort((a, b) => {
@@ -785,11 +890,84 @@ function loadPayloadFromJson(text) {
     }
     return 0;
   });
+
   return {
     ok: true,
-    savedPosts: nextPosts.length,
-    friends: nextFriends.length
+    savedPosts: incomingPosts.length,
+    friends: incomingFriends.length,
+    mergedPosts: state.savedPosts.length,
+    mergedFriends: state.friends.length,
+    addedPosts: postResult.added || 0,
+    updatedPosts: postResult.updated || 0,
+    addedFriends: friendResult.added || 0,
+    updatedFriends: friendResult.updated || 0
   };
+}
+
+function readTextFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('파일 읽기 실패'));
+    reader.readAsText(file, 'utf-8');
+  });
+}
+
+function loadPayloadFromFiles(fileList, options = {}) {
+  const { mergeMode = false } = options;
+  const files = [...(fileList || [])].filter(Boolean);
+  if (!files.length) {
+    return Promise.resolve({ error: '선택된 파일이 없습니다.' });
+  }
+
+  const selectedFiles = mergeMode ? files : files.slice(0, 1);
+
+  return Promise.all(selectedFiles.map((file) => readTextFromFile(file)))
+    .then((texts) => {
+      if (!mergeMode) {
+        const parsedResult = parsePayloadFromText(texts[0]);
+        if (!parsedResult.ok) {
+          return parsedResult;
+        }
+        return applyParsedPayload(parsedResult.parsed, { mergeMode: false });
+      }
+
+      let addedPosts = 0;
+      let updatedPosts = 0;
+      let addedFriends = 0;
+      let updatedFriends = 0;
+
+      for (let index = 0; index < texts.length; index += 1) {
+        const parsedResult = parsePayloadFromText(texts[index]);
+        if (!parsedResult.ok) {
+          const fileName = selectedFiles[index] && selectedFiles[index].name ? selectedFiles[index].name : `파일 ${index + 1}`;
+          return { error: `${fileName} 파싱 실패: ${parsedResult.error}` };
+        }
+
+        const applied = applyParsedPayload(parsedResult.parsed, { mergeMode: true });
+        if (!applied.ok) {
+          return applied;
+        }
+        addedPosts += applied.addedPosts || 0;
+        updatedPosts += applied.updatedPosts || 0;
+        addedFriends += applied.addedFriends || 0;
+        updatedFriends += applied.updatedFriends || 0;
+      }
+
+      return {
+        ok: true,
+        savedPosts: addedPosts + updatedPosts,
+        friends: addedFriends + updatedFriends,
+        mergedPosts: state.savedPosts.length,
+        mergedFriends: state.friends.length,
+        addedPosts,
+        updatedPosts,
+        addedFriends,
+        updatedFriends,
+        files: selectedFiles.length
+      };
+    })
+    .catch(() => ({ error: '파일 읽기 중 오류가 발생했습니다.' }));
 }
 
 function formatTime(value) {
@@ -982,9 +1160,11 @@ function renderPosts() {
 
 function renderFriends() {
   const friends = getFilteredFriends();
+  const friendSize = state.ui.friendSize || 'medium';
 
   buildCategoryOptions(el.friendCategoryFilter, ['all', ...state.friendCategoryList], state.ui.friendCategory);
   fillBulkCategorySelects();
+  el.friendList.dataset.size = friendSize;
 
   if (!friends.length) {
     el.friendList.innerHTML = `<div class="no-data">표시할 팔로워가 없습니다.</div>`;
@@ -1134,20 +1314,41 @@ function handleLoadFromText() {
   }
   saveUiState();
   renderAll();
-  setStatus(`불러오기 완료: 저장글 ${state.savedPosts.length}개, 팔로워 ${state.friends.length}명`);
+  setStatus(`불러오기 완료: 저장글 ${state.savedPosts.length}개, 팔로워 ${state.friends.length}개`);
 }
 
-function handleFileLoad(file) {
-  if (!file) {
+function handleFileLoad(files) {
+  const fileList = [...(files || [])];
+  if (!fileList.length) {
     return;
   }
-  const reader = new FileReader();
-  reader.onload = () => {
-    el.pasteArea.value = String(reader.result || '');
-    handleLoadFromText();
-  };
-  reader.onerror = () => setStatus('파일 읽기 실패');
-  reader.readAsText(file, 'utf-8');
+
+  const mergeMode = !!(el.mergeMode && el.mergeMode.checked);
+  if (!mergeMode && fileList.length > 1) {
+    setStatus('병합 모드가 꺼져 있어 첫 번째 파일만 불러왔습니다.');
+  }
+
+  loadPayloadFromFiles(fileList, { mergeMode })
+    .then((result) => {
+      if (!result.ok) {
+        setStatus(result.error || '파일 로드 실패');
+        return;
+      }
+      saveUiState();
+      renderAll();
+      if (mergeMode) {
+        const addedPosts = result.addedPosts || 0;
+        const updatedPosts = result.updatedPosts || 0;
+        const addedFriends = result.addedFriends || 0;
+        const updatedFriends = result.updatedFriends || 0;
+        setStatus(`병합 완료: 저장글 ${result.mergedPosts || state.savedPosts.length}개, 팔로워 ${result.mergedFriends || state.friends.length}개 (저장글 +${addedPosts} / 갱신${updatedPosts}, 팔로워 +${addedFriends} / 갱신${updatedFriends})`);
+      } else {
+        setStatus(`불러오기 완료: 저장글 ${state.savedPosts.length}개, 팔로워 ${state.friends.length}개`);
+      }
+    })
+    .catch((error) => {
+      setStatus(`파일 로드 실패: ${error?.message || error}`);
+    });
 }
 
 function handlePasteFromClipboard() {
@@ -1190,8 +1391,8 @@ function handleDownloadCurrentData() {
 
 function bindEvents() {
   el.fileInput?.addEventListener('change', (event) => {
-    const file = event.target.files ? event.target.files[0] : null;
-    handleFileLoad(file);
+    const files = event.target.files ? [...event.target.files] : [];
+    handleFileLoad(files);
     event.target.value = '';
   });
 
@@ -1227,10 +1428,12 @@ function bindEvents() {
   });
   el.postSort?.addEventListener('change', (event) => {
     state.ui.postSort = String(event.target.value || 'savedAtDesc');
+    saveUiState();
     renderPosts();
   });
   el.postSize?.addEventListener('change', (event) => {
     state.ui.postSize = String(event.target.value || 'medium');
+    saveUiState();
     renderPosts();
   });
   el.addPostCategoryBtn?.addEventListener('click', () => {
@@ -1249,10 +1452,17 @@ function bindEvents() {
   });
   el.friendSort?.addEventListener('change', (event) => {
     state.ui.friendSort = String(event.target.value || 'crawlOrder');
+    saveUiState();
+    renderFriends();
+  });
+  el.friendSize?.addEventListener('change', (event) => {
+    state.ui.friendSize = String(event.target.value || 'medium');
+    saveUiState();
     renderFriends();
   });
   el.friendMemoOnly?.addEventListener('change', (event) => {
     state.ui.friendMemoOnly = !!event.target.checked;
+    saveUiState();
     renderFriends();
   });
   el.addFriendCategoryBtn?.addEventListener('click', () => {
@@ -1364,6 +1574,35 @@ function bindEvents() {
   });
 }
 
+function syncControlsFromState() {
+  if (el.postCategoryFilter) {
+    const postCategory = state.ui.postCategory || 'all';
+    el.postCategoryFilter.value = postCategory;
+  }
+  if (el.postSort) {
+    const postSort = state.ui.postSort || 'savedAtDesc';
+    el.postSort.value = postSort;
+  }
+  if (el.postSize) {
+    el.postSize.value = state.ui.postSize || 'medium';
+  }
+
+  if (el.friendCategoryFilter) {
+    const friendCategory = state.ui.friendCategory || 'all';
+    el.friendCategoryFilter.value = friendCategory;
+  }
+  if (el.friendSort) {
+    const friendSort = state.ui.friendSort || 'crawlOrder';
+    el.friendSort.value = friendSort;
+  }
+  if (el.friendSize) {
+    el.friendSize.value = state.ui.friendSize || 'medium';
+  }
+  if (el.friendMemoOnly) {
+    el.friendMemoOnly.checked = !!state.ui.friendMemoOnly;
+  }
+}
+
 function renderAll() {
   renderSummary(getFilteredPosts(), getFilteredFriends());
   if (state.ui.activeView === 'friends') {
@@ -1377,6 +1616,7 @@ function renderAll() {
 function init() {
   loadUiState();
   bindEvents();
+  syncControlsFromState();
 
   if (el.viewPosts && el.viewFriends) {
     setViewMode(state.ui.activeView || 'posts');
